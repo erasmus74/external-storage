@@ -7,74 +7,127 @@ standard PVC interface in a simple and portable way.  The PV contains node
 affinity information that the system uses to schedule pods to the correct
 nodes.
 
-An external static provisioner and a related bootstrapper are available to help
-simplify local storage management once the local volumes are configured.  Note
-that the local storage provisioner is different from most provisioners and does
-not support dynamic provisioning.  Instead, it requires that administrators
-preconfigure the local volumes on each node and mount them under discovery
-directories.  The provisioner will manage the volumes under the discovery
-directories by creating and cleaning up PersistentVolumes for each volume.
+An external static provisioner is available to help simplify local storage
+management once the local volumes are configured.  Note that the local
+storage provisioner is different from most provisioners and does
+not support dynamic provisioning yet.  Instead, it requires that administrators
+preconfigure the local volumes on each node and if volumes are supposed to be
 
-## Feature Status
+ 1. Filesystem volumeMode (default) PVs - mount them under discovery directories.
+ 2. Block volumeMode PVs - create a symbolic link under discovery directory to
+    the block device on the node.
 
-Current status: 1.7 & 1.8 - Alpha
+The provisioner will manage the volumes under the discovery directories by creating
+and cleaning up PersistentVolumes for each volume.
 
-What works:
-* Create a PV specifying a directory with node affinity.
+## Configuration Requirements
+
+* The local-volume plugin expects paths to be stable, including across
+  reboots and when disks are added or removed.
+* The static provisioner only discovers either mount points (for Filesystem mode volumes)
+  or symbolic links (for Block mode volumes). For directory-based local volumes, they
+  must be bind-mounted into the discovery directories.
+
+## Version Compatibility
+
+Recommended provisioner versions with Kubernetes versions
+
+| Provisioner version | K8s version   | Reason                    |
+| ------------------- | ------------- | ------------------------- |
+| [2.1.0][3]          | 1.10          | Beta API default, block   |
+| [2.0.0][2]          | 1.8, 1.9      | Mount propagation         |
+| [1.0.1][1]          | 1.7           |                           |
+
+[1]: https://github.com/kubernetes-incubator/external-storage/tree/local-volume-provisioner-v1.0.1/local-volume
+[2]: https://github.com/kubernetes-incubator/external-storage/tree/local-volume-provisioner-v2.0.0/local-volume
+[3]: https://github.com/kubernetes-incubator/external-storage/tree/local-volume-provisioner-v2.1.0/local-volume
+
+## K8s Feature Status
+
+Also see [known issues](KNOWN_ISSUES.md) and [CHANGELOG](CHANGELOG.md).
+
+### 1.10: Beta
+
+* New PV.NodeAffinity field added.
+* **Important:** Alpha PV NodeAffinity annotation is deprecated. Users must manually update
+  their PVs to use the new NodeAffinity field or run a [one-time update job](utils/update-pv-to-beta).
+* Alpha: Raw block support added.
+
+### 1.9: Alpha
+
+* New StorageClass `volumeBindingMode` parameter that will delay PVC binding
+  until a pod is scheduled.
+
+### 1.7: Alpha
+
+* New `local` PersistentVolume source that allows specifying a directory or mount
+  point with node affinity.
 * Pod using the PVC that is bound to this PV will always get scheduled to that node.
-* External static provisioner daemonset that discovers local directories,
-  creates, cleans up and deletes PVs.
 
-What doesn't work and workarounds:
-* Multiple local PVCs in a single pod.
-    * Goal for 1.9.
-    * No known workarounds.
-* PVC binding does not consider pod scheduling requirements and may make
-  suboptimal or incorrect decisions.
-    * Goal for 1.9.
-    * Workarounds:
-        * Run your pods that require local storage first.
-        * Give your pods high priority.
-        * Run a workaround controller that unbinds PVCs for pods that are
-          stuck pending. TODO: add link
-* External provisioner cannot correctly detect capacity of mounts added after it
-  has been started.
-    * This requires mount propagation to work, which is targeted for 1.9.
-    * Workaround: Before adding any new mount points, stop the daemonset, add
-      the new mount points, start the daemonset.
+### Future features
 
-Future features:
 * Local block devices as a volume source, with partitioning and fs formatting
-* Pod accessing local raw block device
+* Dynamic provisioning for shared local persistent storage
 * Local PV health monitoring, taints and tolerations
 * Inline PV (use dedicated local disk as ephemeral storage)
-* Dynamic provisioning for shared local persistent storage
 
 ## User Guide
 
+These instructions reflect the latest version of the codebase.  For instructions
+on older versions, please see version links under
+[Version Compatibility](#version-compatibility).
+
 ### Step 1: Bringing up a cluster with local disks
+
+#### Enabling the alpha feature gates
+
+##### 1.10+
+
+If raw local block feature is needed,
+```
+$ export KUBE_FEATURE_GATES="BlockVolume=true"
+```
+
+Note: Kubernetes versions prior to 1.10 require [several additional
+feature-gates](https://github.com/kubernetes-incubator/external-storage/tree/local-volume-provisioner-v2.0.0/local-volume#enabling-the-alpha-feature-gates) 
+be enabled on all Kubernetes components, because the persistent lcoal volumes and other features were in alpha.
 
 #### Option 1: GCE
 
+GCE clusters brought up with kube-up.sh will automatically format and mount the
+requested Local SSDs, so you can deploy the provisioner with the pre-generated
+deployment spec and skip to [step 4](#step-4-create-local-persistent-volume-claim),
+unless you want to customize the provisioner spec or storage classes.
+
 ``` console
-KUBE_FEATURE_GATES="PersistentLocalVolumes=true" NODE_LOCAL_SSDS=<n> cluster/kube-up.sh
+$ NODE_LOCAL_SSDS_EXT=<n>,<scsi|nvme>,fs cluster/kube-up.sh
+$ kubectl create -f provisioner/deployment/kubernetes/gce/class-local-ssds.yaml
+$ kubectl create -f provisioner/deployment/kubernetes/gce/provisioner_generated_gce_ssd_volumes.yaml
 ```
 
 #### Option 2: GKE
 
-``` console
-gcloud container cluster create ... --local-ssd-count=<n> --enable-kubernetes-alpha --cluster-version=1.7.1
-gcloud container node-pools create ... --local-ssd-count=<n>
-```
+GKE clusters will automatically format and mount the
+requested Local SSDs. Please see
+[GKE documentation](https://cloud.google.com/kubernetes-engine/docs/concepts/local-ssd)
+for instructions for how to create a cluster with Local SSDs.
+
+Then skip to [step 4](#step-4-create-local-persistent-volume-claim).
+
+**Note:** The raw block feature is only supported on GKE Kubernetes alpha clusters.
 
 #### Option 3: Baremetal environments
 
 1. Partition and format the disks on each node according to your application's
    requirements.
 2. Mount all the filesystems under one directory per StorageClass. The directories
-   are specified in a configmap, see below. By default, the discovery directory is
-   `/mnt/disks` and storage class is `local-storage`.
-3. Configure the Kubernetes API Server, controller-manager, scheduler, and all kubelets with the `PersistentLocalVolumes` feature gate.
+   are specified in a configmap, see below.
+3. Configure the Kubernetes API Server, controller-manager, scheduler, and all kubelets
+   with `KUBE_FEATURE_GATES` as described [above](#enabling-the-alpha-feature-gates).
+4. If not using the default Kubernetes scheduler policy, the following
+   predicates must be enabled:
+   * Pre-1.9: `NoVolumeBindConflict`
+   * 1.9+: `VolumeBindingChecker`
 
 #### Option 4: Local test cluster
 
@@ -89,110 +142,89 @@ done
 ```
 
 2. Run the local cluster.
+
 ```console
-$ ALLOW_PRIVILEGED=true LOG_LEVEL=5 FEATURE_GATES=PersistentLocalVolumes=true hack/local-up-cluster.sh
+$ ALLOW_PRIVILEGED=true LOG_LEVEL=5 FEATURE_GATES=$KUBE_FEATURE_GATES hack/local-up-cluster.sh
 ```
 
-3. Continue with [Creating local persistent volumes](#creating-local-persistent-volumes)
-   below.
+### Step 2: Creating a StorageClass (1.9+)
 
-### Step 2: Creating local persistent volumes
+To delay volume binding until pod scheduling and to handle multiple local PVs in
+a single pod, a StorageClass must to be created with `volumeBindingMode` set to
+`WaitForFirstConsumer`.
 
-#### Option 1: Bootstrapping the external static provisioner
-
-This is optional, only for automated creation and cleanup of local volumes. See
-[bootstrapper/](./bootstrapper) and [provisioner/](./provisioner) for details and
-sample configuration files.
-
-1. Create an admin account with cluster admin priviledge:
-``` console
-$ kubectl create -f bootstrapper/deployment/kubernetes/admin-account.yaml
-```
-
-2. Create a ConfigMap with your local storage configuration details:
 ```console
-$ kubectl create -f bootstrapper/deployment/kubernetes/example-config.yaml
+$ kubectl create -f provisioner/deployment/kubernetes/example/default_example_storageclass.yaml
 ```
 
-3. Launch the bootstrapper, which in turn creates static provisioner daemonset:
-``` console
-$ kubectl create -f bootstrapper/deployment/kubernetes/bootstrapper.yaml
-```
+### Step 3: Creating local persistent volumes
 
-The bootstrapper launches the external static provisioner, that discovers and creates local-volume PVs.
+#### Option 1: Using the local volume static provisioner
 
-For example, if the directory `/mnt/disks/` contained one directory `/mnt/disks/vol1` then the following
-local-volume PV would be created by the static provisioner:
+1. Generate Provisioner's ServiceAccount, Roles, DaemonSet, and ConfigMap spec, and customize it.
 
-```
-$ kubectl get pv
-NAME                CAPACITY    ACCESSMODES   RECLAIMPOLICY   STATUS      CLAIM     STORAGECLASS    REASON    AGE
-local-pv-ce05be60   1024220Ki   RWO           Delete          Available             local-storage             26s
+    This step uses helm templates to generate the specs.  See the [helm README](helm) for setup instructions.
+    To generate the provisioner's specs using the [default values](helm/provisioner/values.yaml), run:
 
-$ kubectl describe pv local-pv-ce05be60 
-Name:		local-pv-ce05be60
-Labels:		<none>
-Annotations:	pv.kubernetes.io/provisioned-by=local-volume-provisioner-minikube-18f57fb2-a186-11e7-b543-080027d51893
-		volume.alpha.kubernetes.io/node-affinity={"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["minikub...
-StorageClass:	local-fast
-Status:		Available
-Claim:		
-Reclaim Policy:	Delete
-Access Modes:	RWO
-Capacity:	1024220Ki
-Message:	
-Source:
-    Type:	LocalVolume (a persistent volume backed by local storage on a node)
-    Path:	/mnt/disks/vol1
-Events:		<none>
+    ``` console
+    helm template ./helm/provisioner > ./provisioner/deployment/kubernetes/provisioner_generated.yaml
+    ```
 
-```
+    You can also provide a custom values file instead:
 
-The PV described above can be claimed and bound to a PVC by referencing the `local-fast` storageClassName.
+    ``` console
+    helm template ./helm/provisioner --values custom-values.yaml > ./provisioner/deployment/kubernetes/provisioner_generated.yaml
+    ```
+
+2. Deploy Provisioner
+
+    Once a user is satisfied with the content of Provisioner's yaml file, **kubectl** can be used
+    to create Provisioner's DaemonSet and ConfigMap.
+
+    ``` console
+    $ kubectl create -f ./provisioner/deployment/kubernetes/provisioner_generated.yaml
+    ```
+
+3. Check discovered local volumes
+
+    Once launched, the external static provisioner will discover and create local-volume PVs.
+
+    For example, if the directory `/mnt/disks/` contained one directory `/mnt/disks/vol1` then the following
+    local-volume PV would be created by the static provisioner:
+
+    ```
+    $ kubectl get pv
+    NAME                CAPACITY    ACCESSMODES   RECLAIMPOLICY   STATUS      CLAIM     STORAGECLASS    REASON    AGE
+    local-pv-ce05be60   1024220Ki   RWO           Delete          Available             local-storage             26s
+
+    $ kubectl describe pv local-pv-ce05be60 
+    Name:		local-pv-ce05be60
+    Labels:		<none>
+    Annotations:	pv.kubernetes.io/provisioned-by=local-volume-provisioner-minikube-18f57fb2-a186-11e7-b543-080027d51893
+    StorageClass:	local-fast
+    Status:		Available
+    Claim:		
+    Reclaim Policy:	Delete
+    Access Modes:	RWO
+    Capacity:	1024220Ki
+    NodeAffinity:
+      Required Terms:
+          Term 0:  kubernetes.io/hostname in [my-node]
+    Message:	
+    Source:
+        Type:	LocalVolume (a persistent volume backed by local storage on a node)
+        Path:	/mnt/disks/vol1
+    Events:		<none>
+    ```
+
+    The PV described above can be claimed and bound to a PVC by referencing the `local-fast` storageClassName.
 
 #### Option 2: Manually create local persistent volume
 
-If you don't use the external provisioner, then you have to create the local PVs
-manually. Note that with manual PV creation, the volume has to be manually
-reclaimed when deleted. Example PV:
+See [Kubernetes documentation](https://kubernetes.io/docs/concepts/storage/volumes/#local)
+for an example PersistentVolume spec.
 
-``` yaml
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: example-local-pv
-  annotations:
-    "volume.alpha.kubernetes.io/node-affinity": '{
-      "requiredDuringSchedulingIgnoredDuringExecution": {
-        "nodeSelectorTerms": [
-          { "matchExpressions": [
-            { "key": "kubernetes.io/hostname",
-              "operator": "In",
-              "values": ["my-node"]
-            }
-          ]}
-         ]}
-        }'
-spec:
-  capacity:
-    storage: 5Gi
-  accessModes:
-  - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-storage
-  local:
-    path: /mnt/disks/vol1
-```
-Please replace the following elements to reflect your configuration:
-
-  * "my-node" with the name of kubernetes node that is hosting this
-    local storage disk
-  * "5Gi" with the required size of storage volume, same as specified in PVC
-  * "local-storage" with the name of storage class to associate with
-     this local volume
-  * "/mnt/disks/vol1" with the path to the mount point of local volumes
- 
-### Step 3: Create local persistent volume claim
+### Step 4: Create local persistent volume claim
 
 ``` yaml
 kind: PersistentVolumeClaim
@@ -213,16 +245,50 @@ Please replace the following elements to reflect your configuration:
   * "local-storage" with the name of storage class associated with the
   local PVs that should be used for satisfying this PVC
 
+For "Block" volumeMode PVC, which tries to claim a "Block" PV, the following
+example can be used:
+
+``` yaml
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: example-local-claim
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  volumeMode: Block
+  storageClassName: local-storage
+```
+Note that the only additional field of interest here is volumeMode, which has been set
+to "Block".
+
 ## E2E Tests
 
 ### Running
 ``` console
-go run hack/e2e.go -- -v --test --test_args="--ginkgo.focus=\[Feature:LocalPersistentVolumes\]"
+go run hack/e2e.go -- -v --test --test_args="--ginkgo.focus=PersistentVolumes-local"
 ```
 
 ### View CI Results
-[GCE Alpha](https://k8s-testgrid.appspot.com/sig-storage#gce-alpha)
-[GCE GCI Alpha](https://k8s-testgrid.appspot.com/sig-storage#gci-gce-alpha)
+[GCE](https://k8s-testgrid.appspot.com/sig-storage#gce&include-filter-by-regex=PersistentVolumes-local)
+
+[GKE](https://k8s-testgrid.appspot.com/sig-storage#gke&include-filter-by-regex=PersistentVolumes-local)
+
+[GCE Slow](https://k8s-testgrid.appspot.com/sig-storage#gce-slow&include-filter-by-regex=PersistentVolumes-local)
+
+[GKE Slow](https://k8s-testgrid.appspot.com/sig-storage#gke-slow&include-filter-by-regex=PersistentVolumes-local)
+
+[GCE Serial](https://k8s-testgrid.appspot.com/sig-storage#gce-serial&include-filter-by-regex=PersistentVolumes-local)
+
+[GKE Serial](https://k8s-testgrid.appspot.com/sig-storage#gke-serial&include-filter-by-regex=PersistentVolumes-local)
+
+[GCE Alpha](https://k8s-testgrid.appspot.com/sig-storage#gce-alpha&include-filter-by-regex=PersistentVolumes-local)
+
+[GKE Alpha](https://k8s-testgrid.appspot.com/sig-storage#gke-alpha&include-filter-by-regex=PersistentVolumes-local)
+
 
 ## Best Practices
 
@@ -231,6 +297,21 @@ go run hack/e2e.go -- -v --test --test_args="--ginkgo.focus=\[Feature:LocalPersi
 * Avoid recreating nodes with the same node name while there are still old PVs
   with that node's affinity specified. Otherwise, the system could think that
   the new node contains the old PVs.
+* For volumes with a filesystem, it's recommended to utilize their UUID (e.g.
+  the output from `ls -l /dev/disk/by-uuid`) both in fstab entries
+  and in the directory name of that mount point. This practice ensures
+  that the wrong local volume is not mistakenly mounted, even if its device path
+  changes (e.g. if /dev/sda1 becomes /dev/sdb1 when a new disk is added).
+  Additionally, this practice will ensure that if another node with the
+  same name is created, that any volumes on that node are unique and not
+  mistaken for a volume on another node with the same name.
+* For raw block volumes without a filesystem, use a unique ID as the symlink
+  name. Depending on your environment, the volume's ID in `/dev/disk/by-id/`
+  may contain a unique hardware serial number. Otherwise, a unique ID should be 
+  generated. The uniqueness of the symlink name will ensure that if another 
+  node with the same name is created, that any volumes on that node are 
+  unique and not mistaken for a volume on another node with the same name.
+
 
 ### Deleting/removing the underlying volume
 

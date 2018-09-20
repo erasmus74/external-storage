@@ -49,7 +49,7 @@ func NewGlusterfsProvisioner(config *rest.Config, client kubernetes.Interface) c
 func newGlusterfsProvisionerInternal(config *rest.Config, client kubernetes.Interface) *glusterfsProvisioner {
 	var identity types.UID
 
-	restClient := client.Core().RESTClient()
+	restClient := client.CoreV1().RESTClient()
 	provisioner := &glusterfsProvisioner{
 		config:     config,
 		client:     client,
@@ -184,6 +184,7 @@ func (p *glusterfsProvisioner) createBricks(
 		cmds = []string{
 			fmt.Sprintf("mkdir -p %s", path),
 			fmt.Sprintf("chown :%v %s", gid, path),
+			fmt.Sprintf("chmod 0771 %s", path),
 		}
 		err := p.ExecuteCommands(host, cmds, cfg)
 		if err != nil {

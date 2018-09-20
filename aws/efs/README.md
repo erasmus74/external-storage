@@ -137,43 +137,30 @@ If you are not using RBAC or OpenShift you can continue to the usage section.
 
 ### Authorization
 
-If your cluster has RBAC enabled or you are running OpenShift you must authorize the provisioner. If you are in a namespace/project other than "default" either edit `deploy/auth/clusterrolebinding.yaml` or edit the `oadm policy` command accordingly.
+If your cluster has RBAC enabled or you are running OpenShift you must authorize the provisioner. If you are in a namespace/project other than "default" edit `deploy/rbac.yaml`.
 
 #### RBAC
 ```console
-$ kubectl create -f deploy/auth/serviceaccount.yaml
-serviceaccount "efs-provisioner" created
-$ kubectl create -f deploy/auth/clusterrole.yaml
-clusterrole "efs-provisioner-runner" created
-$ kubectl create -f deploy/auth/clusterrolebinding.yaml
-clusterrolebinding "run-efs-provisioner" created
-$ kubectl patch deployment efs-provisioner -p '{"spec":{"template":{"spec":{"serviceAccount":"efs-provisioner"}}}}'
+# Set the subject of the RBAC objects to the current namespace where the provisioner is being deployed
+$ NAMESPACE=`kubectl config get-contexts | grep '^*' | tr -s ' ' | cut -d' ' -f5`
+$ sed -i'' "s/namespace:.*/namespace: $NAMESPACE/g" ./deploy/rbac.yaml
+$ kubectl create -f deploy/rbac.yaml
 ```
 
-#### OpenShift
-```console
-$ oc create -f deploy/auth/serviceaccount.yaml
-serviceaccount "efs-provisioner" created
-$ oc create -f deploy/auth/openshift-clusterrole.yaml
-clusterrole "efs-provisioner-runner" created
-$ oadm policy add-scc-to-user hostmount-anyuid system:serviceaccount:default:efs-provisioner
-$ oadm policy add-cluster-role-to-user efs-provisioner-runner system:serviceaccount:default:efs-provisioner
-$ oc patch deployment efs-provisioner -p '{"spec":{"template":{"spec":{"serviceAccount":"efs-provisioner"}}}}'
-```
 ### SELinux
 If SELinux is enforcing on the node where the provisioner runs, you must enable writing from a pod to a remote NFS server (EFS in this case) on the node by running:
 ```console
 $ setsebool -P virt_use_nfs 1
 $ setsebool -P virt_sandbox_use_nfs 1
 ```
-https://docs.openshift.org/latest/install_config/persistent_storage/persistent_storage_nfs.html#nfs-selinux
+https://docs.okd.io/latest/install_config/persistent_storage/persistent_storage_nfs.html#nfs-selinux
 
 ## Usage
 
 First a [`StorageClass`](https://kubernetes.io/docs/user-guide/persistent-volumes/#storageclasses) for claims to ask for needs to be created.
 
 ```yaml
-apiVersion: storage.k8s.io/v1beta1
+apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: slow
@@ -277,3 +264,7 @@ The storage section size is a requirment because most other PersistentVolumes ne
 - Can I omit that part of the claim?
 
 No, you must list a size even though it's not used with EFS.
+
+- Can I create multiple StorageClasses for the same provisioner?
+
+Yes, you can create multiple StorageClasses for the same provisioner, each with their own `parameters` settings. Note that if two StorageClasses enable `gidAllocate` and the `gidMin`/`gidMax` ranges overlap, the same gid could be allocated twice.

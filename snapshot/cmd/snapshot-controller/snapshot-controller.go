@@ -39,6 +39,7 @@ import (
 	"github.com/kubernetes-incubator/external-storage/snapshot/pkg/volume/awsebs"
 	"github.com/kubernetes-incubator/external-storage/snapshot/pkg/volume/cinder"
 	"github.com/kubernetes-incubator/external-storage/snapshot/pkg/volume/gcepd"
+	"github.com/kubernetes-incubator/external-storage/snapshot/pkg/volume/gluster"
 	"github.com/kubernetes-incubator/external-storage/snapshot/pkg/volume/hostpath"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 )
@@ -124,18 +125,18 @@ func buildVolumePlugins() {
 				gcePlugin := gcepd.RegisterPlugin()
 				gcePlugin.Init(cloud)
 				volumePlugins[gcepd.GetPluginName()] = gcePlugin
-				glog.Info("Register cloudprovider %s", gcepd.GetPluginName())
+				glog.Infof("Register cloudprovider %s", gcepd.GetPluginName())
 			}
 			if *cloudProvider == openstack.ProviderName {
 				cinderPlugin := cinder.RegisterPlugin()
 				cinderPlugin.Init(cloud)
 				volumePlugins[cinder.GetPluginName()] = cinderPlugin
-				glog.Info("Register cloudprovider %s", cinder.GetPluginName())
+				glog.Infof("Register cloudprovider %s", cinder.GetPluginName())
 			}
 		} else {
 			glog.Warningf("failed to initialize cloudprovider: %v, supported cloudproviders are %#v", err, cloudprovider.CloudProviders())
 		}
 	}
-
+	volumePlugins[gluster.GetPluginName()] = gluster.RegisterPlugin()
 	volumePlugins[hostpath.GetPluginName()] = hostpath.RegisterPlugin()
 }

@@ -17,7 +17,6 @@ limitations under the License.
 package pod
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -47,67 +46,6 @@ func FindPort(pod *v1.Pod, svcPort *v1.ServicePort) (int, error) {
 	}
 
 	return 0, fmt.Errorf("no suitable port for manifest: %s", pod.UID)
-}
-
-// TODO: remove this function when init containers becomes a stable feature
-func SetInitContainersAndStatuses(pod *v1.Pod) error {
-	var initContainersAnnotation string
-	initContainersAnnotation = pod.Annotations[v1.PodInitContainersAnnotationKey]
-	initContainersAnnotation = pod.Annotations[v1.PodInitContainersBetaAnnotationKey]
-	if len(initContainersAnnotation) > 0 {
-		var values []v1.Container
-		if err := json.Unmarshal([]byte(initContainersAnnotation), &values); err != nil {
-			return err
-		}
-		pod.Spec.InitContainers = values
-	}
-
-	var initContainerStatusesAnnotation string
-	initContainerStatusesAnnotation = pod.Annotations[v1.PodInitContainerStatusesAnnotationKey]
-	initContainerStatusesAnnotation = pod.Annotations[v1.PodInitContainerStatusesBetaAnnotationKey]
-	if len(initContainerStatusesAnnotation) > 0 {
-		var values []v1.ContainerStatus
-		if err := json.Unmarshal([]byte(initContainerStatusesAnnotation), &values); err != nil {
-			return err
-		}
-		pod.Status.InitContainerStatuses = values
-	}
-	return nil
-}
-
-// TODO: remove this function when init containers becomes a stable feature
-func SetInitContainersAnnotations(pod *v1.Pod) error {
-	if len(pod.Spec.InitContainers) > 0 {
-		value, err := json.Marshal(pod.Spec.InitContainers)
-		if err != nil {
-			return err
-		}
-		if pod.Annotations == nil {
-			pod.Annotations = make(map[string]string)
-		}
-		pod.Annotations[v1.PodInitContainersAnnotationKey] = string(value)
-		pod.Annotations[v1.PodInitContainersBetaAnnotationKey] = string(value)
-	}
-	return nil
-}
-
-// TODO: remove this function when init containers becomes a stable feature
-func SetInitContainersStatusesAnnotations(pod *v1.Pod) error {
-	if len(pod.Status.InitContainerStatuses) > 0 {
-		value, err := json.Marshal(pod.Status.InitContainerStatuses)
-		if err != nil {
-			return err
-		}
-		if pod.Annotations == nil {
-			pod.Annotations = make(map[string]string)
-		}
-		pod.Annotations[v1.PodInitContainerStatusesAnnotationKey] = string(value)
-		pod.Annotations[v1.PodInitContainerStatusesBetaAnnotationKey] = string(value)
-	} else {
-		delete(pod.Annotations, v1.PodInitContainerStatusesAnnotationKey)
-		delete(pod.Annotations, v1.PodInitContainerStatusesBetaAnnotationKey)
-	}
-	return nil
 }
 
 // Visitor is called with each object name, and returns true if visiting should continue
@@ -144,6 +82,10 @@ func VisitPodSecretNames(pod *v1.Pod, visitor Visitor) bool {
 			}
 		case source.CephFS != nil:
 			if source.CephFS.SecretRef != nil && !visitor(source.CephFS.SecretRef.Name) {
+				return false
+			}
+		case source.Cinder != nil:
+			if source.Cinder.SecretRef != nil && !visitor(source.Cinder.SecretRef.Name) {
 				return false
 			}
 		case source.FlexVolume != nil:
@@ -267,14 +209,10 @@ func GetContainerStatus(statuses []v1.ContainerStatus, name string) (v1.Containe
 }
 
 // GetExistingContainerStatus extracts the status of container "name" from "statuses",
-// and returns empty status if "name" does not exist.
+// It also returns if "name" exists.
 func GetExistingContainerStatus(statuses []v1.ContainerStatus, name string) v1.ContainerStatus {
-	for i := range statuses {
-		if statuses[i].Name == name {
-			return statuses[i]
-		}
-	}
-	return v1.ContainerStatus{}
+	status, _ := GetContainerStatus(statuses, name)
+	return status
 }
 
 // IsPodAvailable returns true if a pod is available; false otherwise.
@@ -300,7 +238,7 @@ func IsPodReady(pod *v1.Pod) bool {
 	return IsPodReadyConditionTrue(pod.Status)
 }
 
-// IsPodReady retruns true if a pod is ready; false otherwise.
+// IsPodReady returns true if a pod is ready; false otherwise.
 func IsPodReadyConditionTrue(status v1.PodStatus) bool {
 	condition := GetPodReadyCondition(status)
 	return condition != nil && condition.Status == v1.ConditionTrue
@@ -319,9 +257,18 @@ func GetPodCondition(status *v1.PodStatus, conditionType v1.PodConditionType) (i
 	if status == nil {
 		return -1, nil
 	}
-	for i := range status.Conditions {
-		if status.Conditions[i].Type == conditionType {
-			return i, &status.Conditions[i]
+	return GetPodConditionFromList(status.Conditions, conditionType)
+}
+
+// GetPodConditionFromList extracts the provided condition from the given list of condition and
+// returns the index of the condition and the condition. Returns -1 and nil if the condition is not present.
+func GetPodConditionFromList(conditions []v1.PodCondition, conditionType v1.PodConditionType) (int, *v1.PodCondition) {
+	if conditions == nil {
+		return -1, nil
+	}
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return i, &conditions[i]
 		}
 	}
 	return -1, nil
@@ -348,8 +295,8 @@ func UpdatePodCondition(status *v1.PodStatus, condition *v1.PodCondition) bool {
 		isEqual := condition.Status == oldCondition.Status &&
 			condition.Reason == oldCondition.Reason &&
 			condition.Message == oldCondition.Message &&
-			condition.LastProbeTime.Equal(oldCondition.LastProbeTime) &&
-			condition.LastTransitionTime.Equal(oldCondition.LastTransitionTime)
+			condition.LastProbeTime.Equal(&oldCondition.LastProbeTime) &&
+			condition.LastTransitionTime.Equal(&oldCondition.LastTransitionTime)
 
 		status.Conditions[conditionIndex] = *condition
 		// Return true if one of the fields have changed.

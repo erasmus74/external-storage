@@ -78,7 +78,7 @@ const (
 
 // NewNFSProvisioner creates a Provisioner that provisions NFS PVs backed by
 // the given directory.
-func NewNFSProvisioner(exportDir string, client kubernetes.Interface, outOfCluster bool, useGanesha bool, ganeshaConfig string, enableXfsQuota bool, serverHostname string) controller.Provisioner {
+func NewNFSProvisioner(exportDir string, client kubernetes.Interface, outOfCluster bool, useGanesha bool, ganeshaConfig string, enableXfsQuota bool, serverHostname string, maxExports int, exportSubnet string) controller.Provisioner {
 	var exp exporter
 	if useGanesha {
 		exp = newGaneshaExporter(ganeshaConfig)
@@ -95,10 +95,10 @@ func NewNFSProvisioner(exportDir string, client kubernetes.Interface, outOfClust
 	} else {
 		quotaer = newDummyQuotaer()
 	}
-	return newNFSProvisionerInternal(exportDir, client, outOfCluster, exp, quotaer, serverHostname)
+	return newNFSProvisionerInternal(exportDir, client, outOfCluster, exp, quotaer, serverHostname, maxExports, exportSubnet)
 }
 
-func newNFSProvisionerInternal(exportDir string, client kubernetes.Interface, outOfCluster bool, exporter exporter, quotaer quotaer, serverHostname string) *nfsProvisioner {
+func newNFSProvisionerInternal(exportDir string, client kubernetes.Interface, outOfCluster bool, exporter exporter, quotaer quotaer, serverHostname string, maxExports int, exportSubnet string) *nfsProvisioner {
 	if _, err := os.Stat(exportDir); os.IsNotExist(err) {
 		glog.Fatalf("exportDir %s does not exist!", exportDir)
 	}
@@ -126,6 +126,8 @@ func newNFSProvisionerInternal(exportDir string, client kubernetes.Interface, ou
 		exporter:       exporter,
 		quotaer:        quotaer,
 		serverHostname: serverHostname,
+		maxExports:     maxExports,
+		exportSubnet:   exportSubnet,
 		identity:       identity,
 		podIPEnv:       podIPEnv,
 		serviceEnv:     serviceEnv,
@@ -158,6 +160,12 @@ type nfsProvisioner struct {
 	// running as a Docker container
 	serverHostname string
 
+	// The maximum number of volumes to be exported by the provisioner
+	maxExports int
+
+	// Subnet for NFS export to allow mount only from
+	exportSubnet string
+
 	// Identity of this nfsProvisioner, generated & persisted to exportDir or
 	// recovered from there. Used to mark provisioned PVs
 	identity types.UID
@@ -172,6 +180,18 @@ type nfsProvisioner struct {
 }
 
 var _ controller.Provisioner = &nfsProvisioner{}
+var _ controller.Qualifier = &nfsProvisioner{}
+
+// ShouldProvision returns whether provisioning should be attempted for the given
+// claim.
+func (p *nfsProvisioner) ShouldProvision(claim *v1.PersistentVolumeClaim) bool {
+	// As long as the export limit has not been reached we're ok to provision
+	ok := p.checkExportLimit()
+	if !ok {
+		glog.Infof("export limit reached. skipping claim %s/%s", claim.Namespace, claim.Name)
+	}
+	return ok
+}
 
 // Provision creates a volume i.e. the storage asset and returns a PV object for
 // the volume.
@@ -245,6 +265,10 @@ func (p *nfsProvisioner) createVolume(options controller.VolumeOptions) (volume,
 	server, err := p.getServer()
 	if err != nil {
 		return volume{}, fmt.Errorf("error getting NFS server IP for volume: %v", err)
+	}
+
+	if ok := p.checkExportLimit(); !ok {
+		return volume{}, &controller.IgnoredError{Reason: fmt.Sprintf("export limit of %v has been reached", p.maxExports)}
 	}
 
 	path := path.Join(p.exportDir, options.PVName)
@@ -366,7 +390,7 @@ func (p *nfsProvisioner) getServer() (string, error) {
 	if namespace == "" {
 		return "", fmt.Errorf("service env %s is set but namespace env %s isn't; no way to get the service cluster IP", p.serviceEnv, p.namespaceEnv)
 	}
-	service, err := p.client.Core().Services(namespace).Get(serviceName, metav1.GetOptions{})
+	service, err := p.client.CoreV1().Services(namespace).Get(serviceName, metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("error getting service %s=%s in namespace %s=%s", p.serviceEnv, serviceName, p.namespaceEnv, namespace)
 	}
@@ -383,7 +407,7 @@ func (p *nfsProvisioner) getServer() (string, error) {
 		{111, v1.ProtocolUDP}:   true,
 		{111, v1.ProtocolTCP}:   true,
 	}
-	endpoints, err := p.client.Core().Endpoints(namespace).Get(serviceName, metav1.GetOptions{})
+	endpoints, err := p.client.CoreV1().Endpoints(namespace).Get(serviceName, metav1.GetOptions{})
 	for _, subset := range endpoints.Subsets {
 		// One service can't have multiple nfs-provisioner endpoints. If it had, kubernetes would round-robin
 		// the request which would probably go to the wrong instance.
@@ -414,6 +438,10 @@ func (p *nfsProvisioner) getServer() (string, error) {
 	return service.Spec.ClusterIP, nil
 }
 
+func (p *nfsProvisioner) checkExportLimit() bool {
+	return p.exporter.CanExport(p.maxExports)
+}
+
 // createDirectory creates the given directory in exportDir with appropriate
 // permissions and ownership according to the given gid parameter string.
 func (p *nfsProvisioner) createDirectory(directory, gid string) error {
@@ -438,7 +466,11 @@ func (p *nfsProvisioner) createDirectory(directory, gid string) error {
 	}
 
 	if gid != "none" {
-		groupID, _ := strconv.ParseUint(gid, 10, 64)
+		groupID, err := strconv.ParseUint(gid, 10, 64)
+		if err != nil {
+			os.RemoveAll(path)
+			return fmt.Errorf("strconv.ParseUint failed with error: %v", err)
+		}
 		cmd := exec.Command("chgrp", strconv.FormatUint(groupID, 10), path)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -455,7 +487,7 @@ func (p *nfsProvisioner) createDirectory(directory, gid string) error {
 func (p *nfsProvisioner) createExport(directory string, rootSquash bool) (string, uint16, error) {
 	path := path.Join(p.exportDir, directory)
 
-	block, exportID, err := p.exporter.AddExportBlock(path, rootSquash)
+	block, exportID, err := p.exporter.AddExportBlock(path, rootSquash, p.exportSubnet)
 	if err != nil {
 		return "", 0, fmt.Errorf("error adding export block for path %s: %v", path, err)
 	}

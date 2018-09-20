@@ -18,6 +18,14 @@ package util
 
 import "k8s.io/api/core/v1"
 
+// Common allocation units
+const (
+	KiB int64 = 1024
+	MiB int64 = 1024 * KiB
+	GiB int64 = 1024 * MiB
+	TiB int64 = 1024 * GiB
+)
+
 // RoundUpSize calculates how many allocation units are needed to accommodate
 // a volume of given size. E.g. when user wants 1500MiB volume, while AWS EBS
 // allocates volumes in gibibyte-sized chunks,
@@ -25,6 +33,11 @@ import "k8s.io/api/core/v1"
 // (2 GiB is the smallest allocatable volume that can hold 1500MiB)
 func RoundUpSize(volumeSizeBytes int64, allocationUnitBytes int64) int64 {
 	return (volumeSizeBytes + allocationUnitBytes - 1) / allocationUnitBytes
+}
+
+// RoundUpToGiB rounds up given quantity upto chunks of GiB
+func RoundUpToGiB(sizeBytes int64) int64 {
+	return RoundUpSize(sizeBytes, GiB)
 }
 
 // AccessModesContains returns whether the requested mode is contained by modes
@@ -45,4 +58,10 @@ func AccessModesContainedInAll(indexedModes []v1.PersistentVolumeAccessMode, req
 		}
 	}
 	return true
+}
+
+// CheckPersistentVolumeClaimModeBlock checks VolumeMode.
+// If the mode is Block, return true otherwise return false.
+func CheckPersistentVolumeClaimModeBlock(pvc *v1.PersistentVolumeClaim) bool {
+	return pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode == v1.PersistentVolumeBlock
 }

@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-all: aws/efs ceph/cephfs ceph/rbd flex gluster/block gluster/glusterfs iscsi/targetd local-volume/provisioner local-volume/bootstrapper nfs-client nfs snapshot openstack/standalone-cinder
+all: aws/efs ceph/cephfs ceph/rbd flex gluster/block gluster/glusterfs gluster/file iscsi/targetd local-volume/provisioner nfs-client nfs snapshot
 .PHONY: all
 
-clean: clean-aws/efs clean-ceph/cephfs clean-ceph/rbd clean-flex clean-gluster/block clean-gluster/glusterfs clean-iscsi/targetd clean-local-volume/provisioner clean-local-volume/bootstrapper clean-nfs-client clean-nfs clean-snapshot clean-openstack/standalone-cinder
+clean: clean-aws/efs clean-ceph/cephfs clean-ceph/rbd clean-flex clean-gluster/block clean-gluster/glusterfs clean-iscsi/targetd clean-local-volume/provisioner clean-nfs-client clean-nfs clean-openebs clean-snapshot
 .PHONY: clean
 
 test: test-aws/efs test-local-volume/provisioner test-nfs test-snapshot
@@ -91,6 +91,16 @@ clean-gluster/glusterfs:
 	make clean
 .PHONY: clean-gluster/glusterfs
 
+gluster/file:
+	cd gluster/file; \
+	make container
+.PHONY: gluster/file
+
+clean-gluster/file:
+	cd gluster/file; \
+	make clean
+.PHONY: clean-gluster/file
+
 iscsi/targetd:
 	cd iscsi/targetd; \
 	make container
@@ -116,15 +126,15 @@ test-local-volume/provisioner:
 	go test ./...
 .PHONY: test-local-volume/provisioner
 
+test-local-volume/helm:
+	cd local-volume/helm; \
+	./test/run.sh
+.PHONY: test-local-volume/helm
+
 clean-local-volume/provisioner:
 	cd local-volume/provisioner; \
 	make clean
 .PHONY: clean-local-volume/provisioner
-
-clean-local-volume/bootstrapper:
-	cd local-volume/bootstrapper; \
-	make clean
-.PHONY: clean-local-volume/bootstrapper
 
 nfs-client:
 	cd nfs-client; \
@@ -136,15 +146,20 @@ clean-nfs-client:
 	rm -f nfs-client-provisioner
 .PHONY: clean-nfs-client
 
-nfs: 
+nfs:
 	cd nfs; \
 	make container
 .PHONY: nfs
 
-test-nfs: 
+test-nfs:
 	cd nfs; \
 	make test
 .PHONY: test-nfs
+
+test-nfs-all:
+	cd nfs; \
+	make test-all
+.PHONY: test-nfs-all
 
 clean-nfs:
 	cd nfs; \
@@ -170,16 +185,6 @@ clean-snapshot:
 	cd snapshot; \
 	make clean
 .PHONY: clean-snapshot
-
-openstack/standalone-cinder:
-	cd openstack/standalone-cinder; \
-	make
-.PHONY: openstack/standalone-cinder
-
-clean-openstack/standalone-cinder:
-	cd openstack/standalone-cinder; \
-	make clean
-.PHONY: clean-openstack/standalone-cinder
 
 test-snapshot:
 	cd snapshot; \
@@ -211,15 +216,15 @@ push-glusterfs-simple-provisioner:
 	make push
 .PHONY: push-glusterfs-simple-provisioner
 
+push-glusterfile-provisioner:
+	cd gluster/file; \
+	make push
+.PHONY: push-glusterfile-provisioner
+
 push-iscsi-controller:
 	cd iscsi/targetd; \
 	make push
 .PHONY: push-iscsi-controller
-
-push-local-volume-provisioner-bootstrap:
-	cd local-volume/bootstrapper; \
-	make push
-.PHONY: push-local-volume-provisioner-bootstrap
 
 push-local-volume-provisioner:
 	cd local-volume/provisioner; \
@@ -235,6 +240,11 @@ push-nfs-provisioner:
 	cd nfs; \
 	make push
 .PHONY: push-nfs-provisioner
+
+push-flex-provisioner:
+	cd flex; \
+	make push
+.PHONY: push-flex-provisioner
 
 push-openebs-provisioner:
 	cd openebs; \

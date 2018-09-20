@@ -18,14 +18,16 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/Sirupsen/logrus"
+
 	"github.com/kubernetes-incubator/external-storage/iscsi/targetd/provisioner"
 	"github.com/kubernetes-incubator/external-storage/lib/controller"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 var log = logrus.New()
@@ -33,21 +35,22 @@ var log = logrus.New()
 // start-controllerCmd represents the start-controller command
 var startcontrollerCmd = &cobra.Command{
 	Use:   "start",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	Short: "Start an iscsi dynamic provisioner",
+	Long:  `Start an iscsi dynamic provisioner`,
 	Run: func(cmd *cobra.Command, args []string) {
 		initLog()
-
 		log.Debugln("start called")
-
+		var config *rest.Config
+		var err error
+		master := viper.GetString("master")
+		kubeconfig := viper.GetString("kubeconfig")
 		// creates the in-cluster config
 		log.Debugln("creating in cluster default kube client config")
-		config, err := rest.InClusterConfig()
+		if master != "" || kubeconfig != "" {
+			config, err = clientcmd.BuildConfigFromFlags(master, kubeconfig)
+		} else {
+			config, err = rest.InClusterConfig()
+		}
 		if err != nil {
 			log.Fatalln(err)
 		}
@@ -55,7 +58,7 @@ to quickly create a Cobra application.`,
 			"config-host": config.Host,
 		}).Debugln("kube client config created")
 
-		//	 creates the clientset
+		// creates the clientset
 		log.Debugln("creating kube client set")
 		kubernetesClientSet, err := kubernetes.NewForConfig(config)
 		if err != nil {
@@ -70,25 +73,20 @@ to quickly create a Cobra application.`,
 			log.Fatalf("Error getting server version: %v", err)
 		}
 
-		//url := viper.GetString("targetd-scheme") + "://" + viper.GetString("targetd-username") + ":" + viper.GetString("targetd-password") + "@" + viper.GetString("targetd-address") + ":" + viper.GetInt("targetd-port")
-
 		url := fmt.Sprintf("%s://%s:%s@%s:%d/targetrpc", viper.GetString("targetd-scheme"), viper.GetString("targetd-username"), viper.GetString("targetd-password"), viper.GetString("targetd-address"), viper.GetInt("targetd-port"))
 
 		log.Debugln("targed URL", url)
 
 		iscsiProvisioner := provisioner.NewiscsiProvisioner(url)
 		log.Debugln("iscsi provisioner created")
-		pc := controller.NewProvisionController(kubernetesClientSet, viper.GetString("provisioner-name"), iscsiProvisioner, serverVersion.GitVersion)
-		//		pc := controller.NewProvisionController(kubernetesClientSet, viper.GetDuration("resync-period"), viper.GetString("provisioner-name"), iscsiProvisioner, serverVersion.GitVersion,
-		//			viper.GetBool("exponential-backoff-on-error"), viper.GetInt("fail-retry-threshold"), viper.GetDuration("lease-period"),
-		//			viper.GetDuration("renew-deadline"), viper.GetDuration("retry-priod"), viper.GetDuration("term-limit"))
+
+		pc := controller.NewProvisionController(kubernetesClientSet, viper.GetString("provisioner-name"), iscsiProvisioner, serverVersion.GitVersion, controller.Threadiness(1))
 		controller.ResyncPeriod(viper.GetDuration("resync-period"))
 		controller.ExponentialBackOffOnError(viper.GetBool("exponential-backoff-on-error"))
 		controller.FailedProvisionThreshold(viper.GetInt("fail-retry-threshold"))
 		controller.FailedDeleteThreshold(viper.GetInt("fail-retry-threshold"))
 		controller.LeaseDuration(viper.GetDuration("lease-period"))
 		controller.RenewDeadline(viper.GetDuration("renew-deadline"))
-		controller.TermLimit(viper.GetDuration("term-limit"))
 		controller.RetryPeriod(viper.GetDuration("retry-period"))
 		log.Debugln("iscsi controller created, running forever...")
 		pc.Run(wait.NeverStop)
@@ -97,7 +95,7 @@ to quickly create a Cobra application.`,
 
 func init() {
 	RootCmd.AddCommand(startcontrollerCmd)
-	startcontrollerCmd.Flags().String("provisioner-name", "iscsi-provisioner", "name of this provisioner, must match what is passed int the storage class annotation")
+	startcontrollerCmd.Flags().String("provisioner-name", "iscsi-targetd", "name of this provisioner, must match what is passed in the storage class annotation")
 	viper.BindPFlag("provisioner-name", startcontrollerCmd.Flags().Lookup("provisioner-name"))
 	startcontrollerCmd.Flags().Duration("resync-period", controller.DefaultResyncPeriod, "how often to poll the master API for updates")
 	viper.BindPFlag("resync-period", startcontrollerCmd.Flags().Lookup("resync-period"))
@@ -111,8 +109,6 @@ func init() {
 	viper.BindPFlag("renew-deadline", startcontrollerCmd.Flags().Lookup("renew-deadline"))
 	startcontrollerCmd.Flags().Duration("retry-period", controller.DefaultRetryPeriod, "RetryPeriod is the duration the LeaderElector clients should wait between tries of actions")
 	viper.BindPFlag("retry-period", startcontrollerCmd.Flags().Lookup("retry-period"))
-	startcontrollerCmd.Flags().Duration("term-limit", controller.DefaultTermLimit, "TermLimit is the maximum duration that a leader may remain the leader to complete the task before it must give up its leadership. 0 for forever or indefinite.")
-	viper.BindPFlag("term-limit", startcontrollerCmd.Flags().Lookup("term-limit"))
 	startcontrollerCmd.Flags().String("targetd-scheme", "http", "scheme of the targetd connection, can be http or https")
 	viper.BindPFlag("targetd-scheme", startcontrollerCmd.Flags().Lookup("targetd-scheme"))
 	startcontrollerCmd.Flags().String("targetd-username", "admin", "username for the targetd connection")
@@ -125,6 +121,12 @@ func init() {
 	viper.BindPFlag("targetd-port", startcontrollerCmd.Flags().Lookup("targetd-port"))
 	startcontrollerCmd.Flags().String("default-fs", "xfs", "filesystem to use when not specified")
 	viper.BindPFlag("default-fs", startcontrollerCmd.Flags().Lookup("default-fs"))
+	startcontrollerCmd.Flags().String("master", "", "Master URL")
+	viper.BindPFlag("master", startcontrollerCmd.Flags().Lookup("master"))
+	startcontrollerCmd.Flags().String("kubeconfig", "", "Absolute path to the kubeconfig")
+	viper.BindPFlag("kubeconfig", startcontrollerCmd.Flags().Lookup("kubeconfig"))
+	startcontrollerCmd.Flags().String("session-chap-credential-file-path", "/var/run/secrets/iscsi-provisioner/session-chap-credential.properties", "path where the credential for session chap authentication can be found")
+	viper.BindPFlag("session-chap-credential-file-path", startcontrollerCmd.Flags().Lookup("session-chap-credential-file-path"))
 
 	// Here you will define your flags and configuration settings.
 
